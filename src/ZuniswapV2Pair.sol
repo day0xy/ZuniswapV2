@@ -63,6 +63,15 @@ contract ZuniswapV2Pair is ERC20, Math {
 
     constructor() ERC20("ZuniswapV2", "ZUNI") {}
 
+    
+
+    function initialize(address token0_, address token1_) public {
+        if (token0 != address(0) || token1 != address(0))
+            revert AlreadyInitialized();
+        token0 = token0_;
+        token1 = token1_;
+    }
+
     function _update(
         uint256 balance0,
         uint256 balance1,
@@ -126,7 +135,104 @@ contract ZuniswapV2Pair is ERC20, Math {
         emit Mint(to, amount0, amount1);
     }
 
+    function swap(
+        uint256 amount0Out,
+        uint256 amount1Out,
+        address to,
+        bytes calldata data
+    ) public nonReentrant {
+        require(
+            amount0Out > 0 || amount1Out > 0,
+            "ZuniswapV2: Insufficient output amount"
+        );
+
+        (uint112 _reserve0, uint112 _reserve1, ) = getReserves();
+
+        if (amount0Out > reserve0 || amount1Out > reserve1) {
+            revert InsufficientLiquidity();
+        }
+
+        if (amount0Out > 0) {
+            IERC20(token0).transfer(to, amount0Out);
+        }
+
+        if (amount1Out > 0) {
+            IERC20(token1).transfer(to, amount1Out);
+        }
+
+        if (data.length > 0) {
+            IZuniswapV2Callee(to).ZuniswapV2Call(
+                msg.sender,
+                amount0Out,
+                amount1Out,
+                data
+            );
+        }
+
+        uint256 balance0 = IERC20(token0).balanceOf(address(this));
+        uint256 balance1 = IERC20(token1).balanceOf(address(this));
+
+        uint256 amount0In = balance0 > _reserve0 - amount0Out
+            ? balance0 - _reserve0 + amount0Out
+            : 0;
+        uint256 amount1In = balance1 > _reserve1 - amount1Out
+            ? balance1 - _reserve1 + amount1Out
+            : 0;
+
+        if (amount0In == 0 && amount1In == 0) revert InsufficientInputAmount();
+
+        uint256 balance0Adjusted = balance0 * 1000 - amount0In * 3;
+        uint256 balance1Adjusted = balance1 * 1000 - amount1In * 3;
+        if (
+            balance0Adjusted * balance1Adjusted <
+            uint256(_reserve0) * uint256(_reserve1) * (1000 ** 2)
+        ) revert InvalidK();
+
+        _update(balance0, balance1, _reserve0, _reserve1);
+        emit Swap(msg.sender, amount0In, amount1In, to);
+    }
+
+    function burn(
+        address to
+    ) public returns (uint256 amount0, uint256 amount1) {
+        uint256 balance0 = IERC20(token0).balance0f(address(this));
+        uint256 balance1 = IERC20(token1).balance0f(address(this));
+
+        //这里router02已经把liquidity传过来了
+        uint256 liquidity = balanceOf[address(this)];
+
+        uint256 amount0 = (balance0 * liquidity) / totalSupply;
+        uint256 amount1 = (balance1 * liquidity) / totalSupply;
+
+        require(
+            amount0 > 0 && amount1 > 0,
+            "ZuniswapV2: Insufficient liquidity burned"
+        );
+
+        _burn(address(this), liquidity);
+        _safeTransfer(token0, to, amount0);
+        _safeTransfer(token1, to, amount1);
+
+        //转移完token之后，更新pair合约的balance
+        balance0 = IERC20(token0).balance0f(address(this));
+        balance1 = IERC20(token1).balance0f(address(this));
+
+        (uint112 reserve0_, uint112 reserve1_, ) = getReserves();
+
+        _update(balance0, balance1, reserve0_, reserve1_);
+
+        emit Burn(msg.sender, amount0, amount1, to);
+    }
+
     function getReserves() public view returns (uint112, uint112, uint32) {
         return (reserve0, reserve1, blockTimestampLast);
+    }
+
+    function _safeTransfer(address token, address to, uint256 value) private {
+        (bool success, bytes memory data) = token.call(
+            abi.encodeWithSignature("transfer(address,uint256)", to, value)
+        );
+        if (!success || (data.length > 0 && !abi.encode(data, (bool))))
+            revert TransferFailed();
     }
 }
